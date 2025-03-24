@@ -364,12 +364,11 @@ def refresh_bots():
             # If it's already been imported reload it, otherwise load it normally.
             if full_path in module_file_list_copy:
                 try:
-                    importlib.reload(module_file_list_copy[full_path])
+                    module = importlib.reload(module_file_list_copy[full_path])
                 except Exception as e:
                     # Catch any errors that occur when reloading the file and print them.
                     print(f"{type(e).__name__} exception raised when reloading \"{full_path}\" for finding chess bots: {e}")
                     continue
-                module = module_file_list_copy[full_path]
             else:
                 module_name = f"{filtered_root}.{path.removesuffix('.py')}"
                 try:
