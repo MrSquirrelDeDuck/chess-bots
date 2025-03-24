@@ -89,3 +89,28 @@ There aren't really any restrictions on what strategies are and aren't allowed, 
 
 ### Contributing:
 To add a new bot to the bot list, you can either create a pull request to add one, or if you know me you can send me your code and I can add it if you don't want to work with GitHub.
+
+## Setting up
+To setup the repository and start making Chess bots:
+1. Install the [Git command line interface](https://git-scm.com/downloads) if you have not already.
+2. Create a new folder where you want to put the code.
+3. Open up the new folder in the terminal or Git Bash.
+4. Clone the repository to this folder with the command `git clone https://github.com/MrSquirrelDeDuck/chess-bots/`.
+5. Open up the `chess-bots` folder that was created.
+6. Create a new folder in the `chess-bots` folder named `dev`, this is where your mid-development bots will reside.
+7. Create a new Python file in the `dev` folder and open it up in your code editor of choice.
+8. Type or paste the following into the new file and save it:
+    ```python
+    import typing
+    import chess
+
+    import base
+
+    class MyBot(base.ChessBot):
+        def turn(
+                self: typing.Self,
+                board: chess.Board
+            ) -> chess.Move:
+            pass
+    ```
+Now you're ready to go! You can replace the `pass` with your bot's code, and can use this file (or any file in the `bots` folder) as a base to create your bot!
