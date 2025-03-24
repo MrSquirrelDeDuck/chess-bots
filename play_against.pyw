@@ -1,0 +1,2 @@
+import play_against_console
+play_against_console.main()

@@ -1,0 +1,2 @@
+import bot_testing_console
+bot_testing_console.main()
