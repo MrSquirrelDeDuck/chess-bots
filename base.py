@@ -361,14 +361,19 @@ def refresh_bots():
             
             filtered_root = root.replace('/', '.').replace('\\', '.')
             
-            # If it's already been imported reload it, otherwise load it normally.
-            if full_path in module_file_list_copy:
-                importlib.reload(module_file_list_copy[full_path])
-                module = module_file_list_copy[full_path]
-            else:
-                module_name = f"{filtered_root}.{path.removesuffix('.py')}"
-                module = importlib.import_module(module_name)
-                globals()[module_name] = module
+            try:
+                # If it's already been imported reload it, otherwise load it normally.
+                if full_path in module_file_list_copy:
+                    importlib.reload(module_file_list_copy[full_path])
+                    module = module_file_list_copy[full_path]
+                else:
+                    module_name = f"{filtered_root}.{path.removesuffix('.py')}"
+                    module = importlib.import_module(module_name)
+                    globals()[module_name] = module
+            except ImportError:
+                # If an ImportError was raised when importing, that likely means
+                # there's a broken import in the imported file, so we should skip it.
+                continue
             
             for obj in module.__dict__.values():
                 try:
