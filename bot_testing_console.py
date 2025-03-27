@@ -490,7 +490,7 @@ class ChessApp(parent_class):
             setting.setting_widget["menu"].delete(0, tk.END)
             
             for option in self.bots_list:
-                setting.setting_widget["menu"].add_command(label=option, command=tk._setit(setting.variable, option))
+                setting.setting_widget["menu"].add_command(label=option, command=tk._setit(setting.variable, option, setting.build_command))
         
         print("Bots reloaded successfully.")
     
