@@ -417,7 +417,7 @@ class ChessApp(parent_class):
         except ValueError:
             messagebox.showerror(
                 title = "Bulk game",
-                message = "The entered number of bulk games it play is not a number."
+                message = "The entered number of bulk games to play is not a number."
             )
             return None
         

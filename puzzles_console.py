@@ -6,9 +6,32 @@ import tkinter.simpledialog as simpledialog
 
 import typing
 import threading
-import time
+import traceback
 import base
+import csv
+import os
+import builtins
+import time
+import re
 
+puzzle_data = []
+
+if not os.path.isfile("data/lichess_db_puzzle.csv"):
+    print()
+    print("To have the bots solve puzzles you need to download the Lichess puzzle database.")
+    print("Once downloaded, extract the `.zst` file and put the resulting `.csv` into the `data` folder.")
+    print("The file should be named `lichess_db_puzzle.csv`.")
+    print("The puzzle database is intentionally not tracked by GitHub due to its size (around 800 MB with 4.8 million puzzles.)")
+    print("The database download can be found here:")
+    print("https://database.lichess.org/#puzzles")
+    print()
+    
+    messagebox.showerror(
+        title = "Missing the puzzle database",
+        message = "The copy of the Lichess puzzle database used by this file to run the puzzles does not appear to exist.\nYou can find instructions in the terminal on how to download and use it."
+    )
+    exit()
+    
 
 try:
     import chess
@@ -123,57 +146,11 @@ if use_bootstrap:
 else:
     IMAGE_SIZE = 100
     bootstyle_kwargs = {}
-
-#######################################################################################################################################
-#######################################################################################################################################
-#######################################################################################################################################
-
-class PromotionDialog(simpledialog.Dialog):
-    def __init__(self, parent, title = None, piece_color: chess.Color = chess.WHITE):
-        if piece_color:
-            self.pieces = PIECE_PHOTOS_WHITE
-        else:
-            self.pieces = PIECE_PHOTOS_BLACK
-        self.result = None
-
-        super().__init__(parent, title)
-
-    def buttonbox(self):
-        box = tk.Frame(self)
-
-        label = tk.Label(
-            box,
-            text = "Which type of piece would you like to promote to?",
-        )
-        label.pack(
-            side = tk.TOP
-        )
-
-        for piece in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]:
-            new_button = ttk.Button(
-                box,
-                image = self.pieces[piece],
-                command = self.build_click(piece),
-                default = tk.ACTIVE,
-                **bootstyle_kwargs
-            )
-            new_button.pack(
-                side = tk.LEFT,
-                padx = 5,
-                pady = 5
-            )
-
-        box.pack()
-
-    def build_click(
-            self: typing.Self,
-            piece: chess.Piece
-        ) -> typing.Callable:
-        def click():
-            self.result = piece
-            self.ok()
-        return click
-
+    
+NOTE_NONE = 0
+NOTE_CORRECT = 1
+NOTE_INCORRECT = 2
+    
 #######################################################################################################################################
 #######################################################################################################################################
 #######################################################################################################################################
@@ -404,6 +381,60 @@ if use_bootstrap:
 else:
     parent_class = tk.Tk
 
+class PuzzleDatabase():
+    def __init__(self: typing.Self) -> None:
+        self.puzzle_cache = {}
+        
+        self.file_path = "data/lichess_db_puzzle.csv"
+            
+        self.reset_reader()
+    
+    def reset_reader(self: typing.Self) -> None:
+        self.opened_file = open(self.file_path, "r")
+        self.reader = csv.reader(self.opened_file)
+    
+    def read_puzzles(
+            self: typing.Self,
+            amount: int,
+            category: str
+        ) -> typing.Generator[tuple[str]]:
+        index = 0
+        while index < amount:
+            give = next(self.reader)
+            
+            if give[1] == "FEN":
+                give = next(self.reader)
+            
+            if category != "" and category not in give[7].split(" "):
+                while category not in give[7].split(" "):
+                    give = next(self.reader)
+            
+            yield give
+            
+            index += 1
+    
+    def find_puzzle_by_id(
+            self: typing.Self,
+            puzzle_id: str
+        ) -> tuple[str] | None:
+        if puzzle_id in self.puzzle_cache:
+            return self.puzzle_cache[puzzle_id]
+        
+        self.reset_reader()
+        
+        for puzzle in self.reader:
+            if puzzle[0] == puzzle_id:
+                self.puzzle_cache[puzzle[0]] = puzzle
+                return puzzle
+            
+        print(next(self.reader))
+        
+        self.puzzle_cache[puzzle_id] = None
+        return None
+
+    def teardown(self: typing.Self) -> None:
+        self.opened_file.close()
+
 class ChessApp(parent_class):
     SOUND_PATHS = {
         "check": "./data/sounds/Check.mp3",
@@ -419,8 +450,13 @@ class ChessApp(parent_class):
     LIGHT_SQUARE_MOVE = "#cdd26a"
     DARK_SQUARE_MOVE = "#aaa23a"
 
-    SELECTED_LIGHT = "#829769"
-    SELECTED_DARK = "#646f40"
+    CORRECT_LIGHT = "#829769"
+    CORRECT_DARK = "#646f40"
+    # CORRECT_LIGHT = "#b5f0b5" # Incredibly light, not sure if I like it.
+    # CORRECT_DARK = "#63b663"
+    
+    INCORRECT_LIGHT = "#976969"
+    INCORRECT_DARK = "#6f4040"
 
     squares: dict[chess.Square, tk.Button] = {}
     labels: list[tk.Label] = []
@@ -430,69 +466,99 @@ class ChessApp(parent_class):
     move_to: list[chess.Square] = []
     last_move: chess.Move = None
 
-    thread: threading.Thread = None
-
-    def __init__(self: typing.Self, *args, **kwargs) -> None:
+    letters = "abcdefgh"
+    numbers = "87654321"
+    
+    def __init__(self: typing.Self, database: PuzzleDatabase, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self.title("Chess Bots")
 
-        self.geometry("848x848+100+100")
+        if use_bootstrap:
+            self.geometry("1350x575+100+100")
+        else:
+            self.geometry("840x375+100+100")
+            
+        # self.resizable(False, False)
 
         try:
             self.iconbitmap("./images/icon.ico")
             self.state('zoomed')
         except: # Mobile will raise issues with this.
             pass
-
-        self.grid_frame = tk.Frame(self)
-        self.grid_frame.pack(pady=10)
-
-        # Setup data, this is updated when a game starts in start_game.
-        self.player_color = chess.WHITE
-        self.start_player_color = chess.WHITE
-        self.board_flipped = not self.player_color
-        self.bot_class = None
-        self.play_sounds = False
-        self.do_random_start = False
-        self.starting_fen = None
-
-        self.random_start_delays = {
-            "1 second": 1,
-            "2 seconds": 2,
-            "3 seconds": 3,
-            "4 seconds": 4,
-            "5 seconds": 5,
-            "Half a second": 0.5,
-            "Quarter of a second": 0.25,
-            "Tenth of a second": 0.1,
-            "No delay": 0,
-            "Instant": -1, # This one also disables refreshing the board and sounds.
+        
+        self.note_colors = {
+            NOTE_NONE: {
+                "light": self.LIGHT_SQUARE_MOVE,
+                "dark": self.DARK_SQUARE_MOVE
+            },
+            NOTE_CORRECT: {
+                "light": self.CORRECT_LIGHT,
+                "dark": self.CORRECT_DARK
+            },
+            NOTE_INCORRECT: {
+                "light": self.INCORRECT_LIGHT,
+                "dark": self.INCORRECT_DARK
+            }
         }
-
-        self.build_images()
-
+        self.move_note = NOTE_NONE
+        
+        self.database = database
         self.board = chess.Board()
         
         self.bot_dict = base.all_bots
         self.bots_list = list(self.bot_dict.keys())
         self.bot_class = list(self.bot_dict.values())[0]
-
+        
+        self.contents = tk.Frame(self)
+        
+        self.contents.grid_rowconfigure(1, weight=1)
+        self.contents.grid_columnconfigure(1, weight=1)
+        
+        self.log = ["Welcome to the Chess bot puzzle tester!"]
+        
+        self.build_images()
+    
+        # print(list(self.database.find_puzzle_by_id("qqFk5")))
+        self.board_flipped = False
         self.build_board()
         self.build_configuration()
-
         self.refresh()
-
-        self.moves_playable = False
-
-        self.bvb_bot_1 = list(self.bot_dict.values())[0]
-        self.bvb_1_data = {}
-        self.bvb_bot_2 = list(self.bot_dict.values())[0]
-        self.bvb_2_data = {}
+        
+        self.refresh_log()
+        
+        self.contents.pack(padx=10, pady=10, fill="both", expand=True)
+    
+    def report_callback_exception(self, exc, val, tb):
+        pass
+        # self.add_log(traceback.format_exc())
 
     #######################################################################################################################
     #######################################################################################################################
     #######################################################################################################################
+    
+    def report_error(func: typing.Callable):
+        """Decorator to catch any errors that occur, log them, and then rereaise them."""
+        def wrapped(self: typing.Self, *args, **kwargs):
+            try:
+                func(self, *args, **kwargs)
+            except:
+                # self.add_log(traceback.format_exc())
+                raise
+        
+        return wrapped
+    
+    def run_in_thread(func: typing.Callable):
+        """Decorator to run the function in a thread automatically when it is run."""
+        def wrapped(self: typing.Self, *args, **kwargs):
+            thread = threading.Thread(
+                target = func,
+                args = (self,) + args,
+                kwargs = kwargs
+            )
+            thread.start()
+        
+        return wrapped
 
     def play_sound(
             self: typing.Self,
@@ -509,236 +575,13 @@ class ChessApp(parent_class):
             args = (self.SOUND_PATHS[sound_name],)
         )
         thread.start()
-
-    def play_random_start(self: typing.Self) -> None:
-        if self.random_start_pgn.get():
-            moves = base.parse_san(self.random_start_pgn.get())
-        else:
-            moves = base.get_random_moves(amount=5)
-
-        delay = self.random_start_delays[self.random_start_delay_var]
-
-        for move in moves:
-            played = self.board.parse_san(move)
-
-            sound_name = "move"
-
-            if self.board.is_capture(played):
-                sound_name = "capture"
-
-            if self.board.is_castling(played):
-                sound_name = "castle"
-
-            if self.board.gives_check(played):
-                sound_name = "check"
-
-            if played.promotion is not None:
-                sound_name = "promotion"
-
-            self.board.push(played)
-            self.last_move = played
-            if delay != -1:
-                self.refresh()
-                self.play_sound(sound_name)
-                time.sleep(delay)
-
-        self.refresh()
-
-    def start_bvb(self: typing.Self) -> None:
-        self.thread = threading.Thread(target=self._start_bvb_internal)
-        self.thread.start()
-
-    def _start_bvb_internal(self: typing.Self) -> None:
-        self.bot_vs_bot = True
-        self.moves_playable = False
-
-        self.board.reset()
-
-        self.selected_square = None
-        self.move_to = []
-        self.last_move = None
-
-        if self.do_random_start:
-            self.play_random_start()
-
-        self.bot_data = {}
-        self.refresh()
-
-        self.start_bvb_bot_1()
-
-    def start_game(
-            self: typing.Self,
-            bot_class: typing.Callable = None,
-            player_side: chess.Color = None,
-            fen: str = None
-        ) -> None:
-        self.thread = threading.Thread(target=self._start_game_internal, args=(bot_class, player_side, fen))
-        self.thread.start()
-
-    def _start_game_internal(
-            self: typing.Self,
-            bot_class: typing.Callable = None,
-            player_side: chess.Color = None,
-            fen: str = None,
-            skip_turn: bool = False # Use if a FEN string is passed and is black to move.
-        ) -> None:
-        if fen is None:
-            fen = chess.STARTING_BOARD_FEN
-            self.starting_fen = None
-        else:
-            self.starting_fen = fen
-
-        self.bot_vs_bot = False
-
-        if bot_class is not None:
-            self.bot_class = bot_class
-        if player_side is None:
-            player_side = self.start_player_color
-
-        self.moves_playable = True
-
-        prior_player_color = self.player_color
-
-        self.player_color = player_side
-        self.board_flipped = not self.player_color
-
-        if self.player_color != prior_player_color:
-            self.rebuild_board()
-
-        self.board.reset()
-        self.board.set_board_fen(fen)
-
-        if skip_turn:
-            self.board.push(chess.Move.null())
-
-        if self.starting_fen is not None:
-            self.starting_fen = self.board.fen()
-
-        self.selected_square = None
-        self.move_to = []
-        self.last_move = None
-
-        if self.do_random_start and self.starting_fen is None:
-            self.play_random_start()
-
-        self.bot_data = {}
-        self.refresh()
-
-        if self.player_color != self.board.turn:
-            self.start_bot()
-
-    def check_end(self: typing.Self) -> bool:
-        if not self.board.is_game_over():
-            return False
-
-        self.game_over = True
-        self.moves_playable = False
-
-        outcome = self.board.outcome()
-
-        messagebox.showinfo(
-            title = "Game over!",
-            message = f"The game has ended by {outcome.termination.name.lower().replace('_', ' ')}."
-        )
-        return True
-
-    def _bot_turn(self: typing.Self) -> None:
-        self.bot.load(self.bot_data)
-        try:
-            # self.board.copy(), RIP CheatBot.
-            move = self.bot.turn(self.board.copy())
-        except:
-            messagebox.showinfo(
-                title = "Game over!",
-                message = "The bot ran into an error while figuring out what move to play. As far as I am concerned that counts as a win for you, great job!"
-            )
-            self.game_over = True
-            self.moves_playable = False
-            raise
-        saved = self.bot.save()
-        if saved is not None:
-            self.bot_data = saved
-
-        self.play_move(
-            move = move,
-            refresh = True
-        )
-
-    def _bvb_bot_1_turn(self: typing.Self) -> None:
-        self.bvb_1.load(self.bvb_1_data)
-        try:
-            move = self.bvb_1.turn(self.board.copy())
-        except:
-            messagebox.showinfo(
-                title = "Game over!",
-                message = "The bot ran into an error while figuring out what move to play. As far as I am concerned that counts as a win for you, great job!"
-            )
-            self.game_over = True
-            self.moves_playable = False
-            raise
-        saved = self.bvb_1.save()
-        if saved is not None:
-            self.bvb_1_data = saved
-
-        self.play_move(
-            move = move,
-            refresh = True
-        )
-
-    def _bvb_bot_2_turn(self: typing.Self) -> None:
-        self.bvb_2.load(self.bvb_2_data)
-        try:
-            move = self.bvb_2.turn(self.board.copy())
-        except:
-            messagebox.showinfo(
-                title = "Game over!",
-                message = "The bot ran into an error while figuring out what move to play. As far as I am concerned that counts as a win for you, great job!"
-            )
-            self.game_over = True
-            self.moves_playable = False
-            raise
-        saved = self.bvb_2.save()
-        if saved is not None:
-            self.bvb_2_data = saved
-
-        self.play_move(
-            move = move,
-            refresh = True
-        )
-
-    def start_bot(self: typing.Self) -> None:
-        self.bot = self.bot_class(self.bot_data)
-        self.thread = threading.Thread(target=self._bot_turn)
-        self.thread.start()
-
-    def start_bvb_bot_1(self: typing.Self) -> None:
-        self.bvb_1 = self.bvb_bot_1(self.bvb_1_data)
-        print(f"[BVB] Time for {self.bvb_1.name} to play.")
-        self.thread = threading.Thread(target=self._bvb_bot_1_turn)
-        self.thread.start()
-
-    def start_bvb_bot_2(self: typing.Self) -> None:
-        self.bvb_2 = self.bvb_bot_2(self.bvb_2_data)
-        print(f"[BVB] Time for {self.bvb_2.name} to play.")
-        self.thread = threading.Thread(target=self._bvb_bot_2_turn)
-        self.thread.start()
-
+        
     def play_move(
             self: typing.Self,
             move: chess.Move,
             refresh: bool = False
         ) -> None:
         sound_name = "move"
-
-        # Check for promotion.
-        if move.promotion is None and self.board.turn == self.player_color:
-            if (chess.square_rank(move.to_square) == 0 \
-               or chess.square_rank(move.to_square) == 7) \
-               and self.board.piece_at(move.from_square).piece_type == chess.PAWN:
-                move.promotion = PromotionDialog(self, title="Promotion").result
-
-                if move.promotion is None:
-                    return
 
         if self.board.is_capture(move):
             sound_name = "capture"
@@ -760,20 +603,211 @@ class ChessApp(parent_class):
         if refresh:
             self.refresh()
 
-        if self.check_end():
-            return
-
         self.play_sound(sound_name)
 
-        if self.bot_vs_bot:
-            if self.board.turn:
-                self.start_bvb_bot_1()
-            else:
-                self.start_bvb_bot_2()
-        else:
+    def _bot_turn(self: typing.Self) -> None:
+        self.bot.load(self.bot_data)
+        try:
+            # self.board.copy(), RIP CheatBot.
+            move = self.bot.turn(self.board.copy())
+        except:
+            messagebox.showerror(
+                title = "An error occurred!",
+                message = "The bot ran into an error and was unable to find a move."
+            )
+            raise
+        saved = self.bot.save()
+        if saved is not None:
+            self.bot_data = saved
+        
+        if move is None:
+            raise TypeError("The move played by the bot is None.")
+        
+        return move
+    
+    def run_puzzle(
+            self: typing.Self,
+            puzzle_data: list[str]
+        ) -> dict[str, str | int | bool]:
+        puzzle_id, fen, moves, rating, ratingdeviation, populatity, playamount, themes, gameurl, openingtags = puzzle_data
+        
+        print(f"Playing puzzle {puzzle_id}")
+        
+        self.bot_data = {}
+        self.bot = self.bot_class(self.bot_data)
+        
+        self.board.set_fen(fen)
+        self.refresh_orientation(not self.board.turn)
+        self.refresh()
+        
+        moves_split = moves.split(" ")
+        
+        correct = True
+        
+        self.bot_side = not self.board.turn
+        for index, correct_move_uci in enumerate(moves_split):
             # If it's time for the bot to play its move.
-            if self.board.turn != self.player_color:
-                self.start_bot()
+            if self.board.turn == self.bot_side:
+                move = self._bot_turn()
+                
+                print(f"Move {(index + 1) // 2}: {'Correct!' if move.uci() == correct_move_uci else 'Incorrect.'}")
+                if move.uci() == correct_move_uci:
+                    # Yippee
+                    self.move_note = NOTE_CORRECT
+                else:
+                    self.board.push(move)
+                    if self.board.is_checkmate():
+                        self.move_note = NOTE_CORRECT
+                    else:
+                        self.move_note = NOTE_INCORRECT
+                    self.board.pop()
+            else:
+                move = chess.Move.from_uci(correct_move_uci)
+                self.move_note = NOTE_NONE
+                
+                if index != 0 and self.do_delay:
+                    time.sleep(0.25)
+                
+            self.play_move(move, True)
+            
+            if self.move_note == NOTE_INCORRECT:
+                correct = False
+                break
+        
+        return {
+            "correct": correct,
+            "themes": themes.split(" "),
+            "rating": int(rating),
+            "puzzle_id": puzzle_id
+        }
+    
+    @run_in_thread
+    @report_error
+    def run_bulk_puzzles(self: typing.Self) -> None:
+        try:
+            num_puzzles = int(self.bulk_puzzle_amount.get())
+        except ValueError:
+            messagebox.showerror(
+                title = "Bulk game",
+                message = "The entered number of bulk games to play is not a number."
+            )
+            return None
+        
+        correct = 0
+        correct_rating_sum = 0
+        incorrect_rating_sum = 0
+        
+        highest_correct_rating = 0
+        highest_correct_id = None
+        
+        lowest_incorrect_rating = float("inf")
+        lowest_incorrect_id = None
+        
+        themes = {}
+        
+        self.database.reset_reader()
+        
+        start = time.time()
+        
+        try:
+            for index, puzzle in enumerate(self.database.read_puzzles(num_puzzles, self.specific_category.get())):
+                data = self.run_puzzle(puzzle)
+                
+                if data["correct"]:
+                    correct += 1
+                    correct_rating_sum += data["rating"]
+                    
+                    if data["rating"] > highest_correct_rating:
+                        highest_correct_rating = data["rating"]
+                        highest_correct_id = data["puzzle_id"]
+                else:
+                    incorrect_rating_sum += data["rating"]
+                
+                    if data["rating"] < lowest_incorrect_rating:
+                        lowest_incorrect_rating = data["rating"]
+                        lowest_incorrect_id = data["puzzle_id"]
+                
+                for theme in data["themes"]:
+                    if theme not in themes:
+                        themes[theme] = {"played": 1, "correct": int(data["correct"])}
+                    else:
+                        themes[theme]["played"] += 1
+                        if data["correct"]:
+                            themes[theme]["correct"] += 1
+                
+                current = time.time()
+                print(f"Done {index + 1}/{num_puzzles} ({round((index + 1) / num_puzzles * 100, 2)}%) | Elapsed: {round(current - start, 2)} | Remaining: {round((current - start) / (index + 1) * (num_puzzles - (index+ 1)), 2)}"
+                    f" | Correct: {correct} ({round(correct / (index + 1) * 100, 2)}%), Incorrect: {index + 1 - correct} ({round((1 - correct / (index + 1)) * 100, 2)}%)"
+                )
+                if self.do_delay:
+                    time.sleep(0.5)
+        except RuntimeError:
+            print("Out of puzzles to solve!\n")
+        
+        lines = [
+            f"Correct: {correct} ({round(correct / num_puzzles * 100, 2)}%)",
+            f"Incorrect: {num_puzzles - correct} ({round((1 - correct / num_puzzles) * 100, 2)}%)",
+            f"Average correct rating: {round(correct_rating_sum / (correct if correct != 0 else 1), 2)}",
+            f"Average incorrect rating: {round(incorrect_rating_sum / ((num_puzzles - correct) if correct != num_puzzles else 1), 2)}",
+            "",
+            "Highest rated correctly solved:",
+            f"- Rating: {highest_correct_rating}",
+            f"- Link: https://lichess.org/training/{highest_correct_id}",
+            "",
+            "Lowest rated incorrectly solved:",
+            f"- Rating: {lowest_incorrect_rating}",
+            f"- Link: https://lichess.org/training/{lowest_incorrect_id}",
+            "",
+            "Theme information:",
+        ]
+        lines.extend([
+            f"- {name}: {data['correct']}/{data['played']} ({round(data['correct'] / data['played'] * 100, 2)}%)"
+            for name, data in sorted(list(themes.items()), key=lambda a: a[1]['correct'] / a[1]['played'], reverse=True)
+        ])
+        
+        max_length = len(max(lines, key=len))
+        
+        print(f" {num_puzzles} {'bulk' if self.specific_category.get() == '' else self.specific_category.get()} puzzles: ".center(max_length + 4, "#"))
+        
+        for line in lines:
+            print("# " + line.ljust(max_length) + " #")
+        
+        print("#" * (max_length + 4))
+            
+            
+        
+    
+    @run_in_thread
+    @report_error
+    def run_single_puzzle(self: typing.Self) -> None:
+        # self.board.push("4")
+        puzzle_data = self.database.find_puzzle_by_id(self.puzzle_id.get())
+        
+        if puzzle_data is None:
+            messagebox.showerror(
+                title = "Single puzzle",
+                message = f"The given puzzle id, {self.puzzle_id.get()}, does not exist in the database."
+            )
+            return
+        
+        data = self.run_puzzle(puzzle_data)
+        
+        lines = [
+            f"Bot got it correct: {str(data['correct'])}",
+            f"Puzzle rating: {data['rating']}",
+            "Themes:"
+        ]
+        lines.extend([f"- {i}" for i in data["themes"]])
+        
+        max_length = len(max(lines, key=len))
+        
+        print(f" Puzzle {data['puzzle_id']}: ".center(max_length + 4, "#"))
+        
+        for line in lines:
+            print("# " + line.ljust(max_length) + " #")
+        
+        print("#" * (max_length + 4))
+        
 
     #######################################################################################################################
     #######################################################################################################################
@@ -817,8 +851,8 @@ class ChessApp(parent_class):
         if self.selected_square == square or square in self.move_to:
             self.set_button_color(
                 button = button,
-                light_color = self.SELECTED_LIGHT,
-                dark_color = self.SELECTED_DARK,
+                light_color = self.CORRECT_LIGHT,
+                dark_color = self.CORRECT_DARK,
                 color = button.square_color
             )
             return
@@ -836,8 +870,8 @@ class ChessApp(parent_class):
             or square == self.last_move.to_square:
             self.set_button_color(
                 button = button,
-                light_color = self.LIGHT_SQUARE_MOVE,
-                dark_color = self.DARK_SQUARE_MOVE,
+                light_color = self.note_colors[self.move_note]["light"],
+                dark_color = self.note_colors[self.move_note]["dark"],
                 color = button.square_color
             )
         else:
@@ -848,53 +882,60 @@ class ChessApp(parent_class):
                 color = button.square_color
             )
 
-    def refresh_board_info(self: typing.Self) -> None:
-        self.fen_box_var.set(self.board.fen())
-
-        #################
-
-        board_copy = self.board.copy()
-
-        moves_reverse = []
-
-        for _ in range(len(board_copy.move_stack)):
-            move = board_copy.pop()
-            moves_reverse.append(board_copy.san(move))
-
-        moves = list(reversed(moves_reverse))
-        moves_pgn = []
-
-        for index in range(0, len(moves_reverse), 2):
-            moves_pgn.append(f"{index // 2 + 1}. {' '.join(moves[index:index+2])}")
-
-        pgn = " ".join(moves_pgn)
-
-        if self.starting_fen is not None:
-            pgn = f"""[Variant "From Position"]\n[FEN "{self.starting_fen}"]\n\n{pgn}"""
-
-        self.pgn_box_var.set(pgn)
-
     def refresh(self: typing.Self) -> None:
         for square, button in self.squares.items():
             self.refresh_square_piece(square, button)
             self.refresh_square_color(square, button)
-
-        self.refresh_board_info()
-    
-    def refresh_bots(self: typing.Self) -> None:
-        base.refresh_bots()
-        self.bot_dict = base.all_bots
-        self.bots_list = list(self.bot_dict.keys())
-        
-        for setting in self.settings_list:
-            if not isinstance(setting, BotMenuSetting):
-                continue
-                
-            setting.variable.set(self.bots_list[0])
-            setting.setting_widget["menu"].delete(0, tk.END)
             
-            for option in self.bots_list:
-                setting.setting_widget["menu"].add_command(label=option, command=tk._setit(setting.variable, option, setting.build_command))
+    def refresh_log(self: typing.Self) -> None:
+        self.bot_log.config(state=tk.NORMAL)
+        self.bot_log.delete("1.0", tk.END)
+        self.bot_log.insert(tk.END, "\n".join(self.log))
+        self.bot_log.config(state=tk.DISABLED)
+        self.bot_log.yview(tk.END)
+    
+    def add_log(self: typing.Self, message: str) -> None:
+        message = re.sub("[lL][iI][aA][mM]", "BOINGE", message)
+        self.bot_log.config(state=tk.NORMAL)
+        self.log.append(message)
+        self.bot_log.insert(tk.END, "\n" + message)
+        self.bot_log.config(state=tk.DISABLED)
+        self.bot_log.yview(tk.END)
+    
+    def refresh_orientation(
+            self: typing.Self,
+            new_state: bool = None
+        ) -> None:
+        if new_state is None:
+            new_state = self.board.turn
+        
+        if new_state:
+            if self.squares[chess.A1].initial_index == chess.A1:
+                return
+        else:
+            if self.squares[chess.H8].initial_index == chess.A1:
+                return
+        
+        squares_copy = self.squares.copy()
+        self.squares.clear()
+        
+        for button in squares_copy.values():
+            if new_state:
+                self.squares[button.initial_index] = button
+            else:
+                self.squares[63 - button.initial_index] = button
+        
+        for label in self.labels:
+            if new_state:
+                if label.is_letter:
+                    label.config(text=self.letters[label.initial_index])
+                else:
+                    label.config(text=self.numbers[label.initial_index])
+            else:
+                if label.is_letter:
+                    label.config(text=self.letters[7 - label.initial_index])
+                else:
+                    label.config(text=self.numbers[7 - label.initial_index])
 
     #######################################################################################################################
     #######################################################################################################################
@@ -936,83 +977,25 @@ class ChessApp(parent_class):
         self.PIECE_PHOTOS_WHITE = PIECE_PHOTOS_WHITE
         self.PIECE_PHOTOS_BLACK = PIECE_PHOTOS_BLACK
         self.BLANK_IMAGE = BLANK_IMAGE
-
-    def build_click(
-            self: typing.Self,
-            square: chess.Square
-        ) -> typing.Callable[[None], None]:
-        def click():
-            if not self.moves_playable:
-                return
-
-            if self.board.turn != self.player_color:
-                return
-
-            if square in self.move_to:
-                new_move = chess.Move(
-                    from_square = self.selected_square,
-                    to_square = square
-                )
-
-                self.play_move(
-                    move = new_move,
-                    refresh = True
-                )
-                return
-
-            if square == self.selected_square:
-                self.selected_square = None
-                self.move_to = []
-                self.refresh()
-                return
-
-            piece = self.board.piece_at(square)
-
-            if piece is None:
-                if square is not None:
-                    self.selected_square = None
-                    self.move_to = []
-                    self.refresh()
-                return
-
-            if piece.color == self.player_color:
-                self.selected_square = square
-                self.move_to = []
-
-                for move in self.board.legal_moves:
-                    if move.from_square != square:
-                        continue
-
-                    self.move_to.append(move.to_square)
-
-            self.refresh()
-
-        return click
-
+        
     def build_board(self: typing.Self) -> None:
-        # import random
-        # square_positions = [(r, c) for r in range(8) for c in range(8)]
-        # random.shuffle(square_positions)
-
+        self.board_frame = tk.Frame(self.contents)
+        
         for row in range(8):
             for column in range(8):
                 color = self.DARK_SQUARE if (row + column) % 2 else self.LIGHT_SQUARE
                 square_id = chess.square(column, row)
 
                 new_button = tk.Button(
-                    master = self.grid_frame,
+                    master = self.board_frame,
                     image = self.BLANK_IMAGE,
-                    command = self.build_click(square_id),
                     cursor = "hand2",
                     bg = color,
                     activebackground = color
                 )
                 new_button.square_color = ((row + column) % 2)
+                new_button.initial_index = square_id
 
-                # new_button.grid(
-                #     row = square_positions[square_id][0],
-                #     column = square_positions[square_id][1]
-                # )
                 if self.board_flipped:
                     new_button.grid(
                         column = 7 - column,
@@ -1026,61 +1009,46 @@ class ChessApp(parent_class):
 
                 self.squares[square_id] = new_button
 
-        letters = "abcdefgh"
-        numbers = "87654321"
-
         if self.board_flipped:
-            letters = "".join(reversed(letters))
-            numbers = "".join(reversed(numbers))
+            letters = "".join(reversed(self.letters))
+            numbers = "".join(reversed(self.numbers))
+        else:
+            letters = self.letters
+            numbers = self.numbers
 
         self.labels.clear()
 
         for index, letter in enumerate(letters):
             new_label = tk.Label(
-                master = self.grid_frame,
+                master = self.board_frame,
                 text = letter
             )
             new_label.grid(
                 row = 8,
                 column = index
             )
+            new_label.initial_index = index
+            new_label.is_letter = True
             self.labels.append(new_label)
 
         for index, number in enumerate(numbers):
             new_label = tk.Label(
-                master = self.grid_frame,
+                master = self.board_frame,
                 text = number
             )
             new_label.grid(
                 row = index,
                 column = 8
             )
+            new_label.initial_index = index
+            new_label.is_letter = False
             self.labels.append(new_label)
-
-    def rebuild_board(self: typing.Self) -> None:
-        for button in self.squares.values():
-            button.destroy()
-
-        for label in self.labels:
-            label.destroy()
-
-        self.squares.clear()
-
-        self.build_board()
-        self.refresh()
+        
+        self.board_frame.grid(row=0, column=0)
 
     #######################################################################################################################
     #######################################################################################################################
     #######################################################################################################################
-
-    def build_option_menu_change(
-            self: typing.Self,
-            attr_name: str
-        ) -> typing.Callable:
-        def click(selected):
-            setattr(self, attr_name, selected)
-
-        return click
 
     def build_bot_menu_change(
             self: typing.Self,
@@ -1091,28 +1059,6 @@ class ChessApp(parent_class):
 
         return click
 
-    def build_random_start_change(
-            self: typing.Self,
-            attr_name: str,
-            variable: tk.Variable
-        ) -> typing.Callable:
-        def click():
-            state = variable.get()
-            setattr(self, attr_name, state)
-
-            if state:
-                self.random_start_entry["state"] = "normal"
-            else:
-                self.random_start_entry["state"] = "readonly"
-
-        return click
-
-    def on_color_selection_change(
-            self: typing.Self,
-            selected: str
-        ) -> None:
-        self.start_player_color = chess.WHITE if selected == "White" else chess.BLACK
-
     def build_checkbox_tick(
             self: typing.Self,
             attr_name: str,
@@ -1122,129 +1068,75 @@ class ChessApp(parent_class):
             setattr(self, attr_name, variable.get())
 
         return click
-
+    
     def build_configuration(self: typing.Self) -> None:
         style = ttk.Style()
         # style.theme_use("clam")
         style.configure("TButton", font=("Arial", 20, "bold"))
-
-        self.fen_box_var = tk.StringVar(self)
-        self.fen_box = ttk.Entry(
-            master = self,
-            state = "readonly",
-            textvariable = self.fen_box_var,
-            width = 100
-        )
-        self.fen_box.pack()
-
-        self.pgn_box_var = tk.StringVar(self)
-        self.pgn_box = ttk.Entry(
-            master = self,
-            state = "readonly",
-            textvariable = self.pgn_box_var,
-            width = 100
-        )
-        self.pgn_box.pack()
-
-        ####################
-        # config_frame = tk.Frame(self)
+        
         if use_bootstrap:
-            config_frame = ttk_scrolled.ScrolledFrame(self, width=500, autohide=True)
+            config_frame = ttk_scrolled.ScrolledFrame(self.contents, width=500, autohide=True)
         else:
-            config_frame = tk.Frame(self)
-
+            config_frame = tk.Frame(self.contents)
+            
         self.settings_list = [
-            # Index 0
-            SettingButton(
-                app = self,
-                identifier = "start_button",
-                button_text = "Start game",
-                command = self.start_game
-            ),
-            # Index 1
             BotMenuSetting(
                 app = self,
                 identifier = "bot_menu",
                 label = "Bot to play against:",
                 variable_name = "bot_class"
             ),
-            # Index 2
-            OptionMenuSetting(
-                app = self,
-                identifier = "color_menu",
-                label = "Side to play as:",
-                options = ["White", "Black"],
-                variable_name = "color_menu_variable",
-                command = self.on_color_selection_change
-            ),
-            # Index 3
-            # This is where the sounds tickbox will go if it is enabled.
-            ##################################
-            # Index 4
-            SettingLabel("Random start:"),
-            # Index 5
-            CheckboxSetting(
-                app = self,
-                identifier = "random_start",
-                label = "Random start?",
-                variable_name = "do_random_start",
-                builder = self.build_random_start_change
-            ),
-            # Index 6
             EntrySetting(
                 app = self,
-                identifier = "random_start_entry",
-                label = "Random start pgn:",
-                variable_name = "random_start_pgn"
+                identifier = "bulk_puzzle_input",
+                variable_name = "bulk_puzzle_amount",
+                label = "Number of puzzles:",
+                default = "25"
             ),
-            # Index 7
-            OptionMenuSetting(
+            EntrySetting(
                 app = self,
-                identifier = "random_start_delay",
-                label = "Random start move delay:",
-                options = list(self.random_start_delays.keys()),
-                variable_name = "random_start_delay_var"
+                identifier = "category_input",
+                variable_name = "specific_category",
+                label = "Bulk puzzle category:",
+                default = ""
             ),
-            ##################################
-            # Index 8
-            SettingLabel("Bot versus bot:"),
-            # Index 9
-            BotMenuSetting(
-                app = self,
-                identifier = "bvb_menu_1",
-                label = "White:",
-                variable_name = "bvb_bot_1"
-            ),
-            # Index 10
-            BotMenuSetting(
-                app = self,
-                identifier = "bvb_menu_2",
-                label = "Black:",
-                variable_name = "bvb_bot_2"
-            ),
-            # Index 11
             SettingButton(
                 app = self,
-                identifier = "bvb_start_game",
-                button_text = "Start bot vs bot game",
-                command = self.start_bvb
+                identifier = "bulk_puzzle_button",
+                button_text = "Run bulk puzzle test",
+                command = self.run_bulk_puzzles
             ),
-            SettingLabel(),
+            SettingLabel("Single puzzle settings:"),
+            EntrySetting(
+                app = self,
+                identifier = "puzzle_id_input",
+                variable_name = "puzzle_id",
+                label = "Specific puzzle id:",
+                default = "00008"
+            ),
             SettingButton(
                 app = self,
-                identifier = "refresh_bots",
-                button_text = "Refresh bots",
-                command = self.refresh_bots
+                identifier = "single_puzzle_button",
+                button_text = "Run on a single puzzle",
+                command = self.run_single_puzzle
             ),
+            SettingLabel("Global settings:")
         ]
         
         if has_sound:
-            self.settings_list.insert(3, CheckboxSetting(
+            self.settings_list.append(CheckboxSetting(
                 app = self,
                 identifier = "sounds",
                 label = "Sounds?",
                 variable_name = "play_sounds"
             ))
+            
+        self.settings_list.append(CheckboxSetting(
+            app = self,
+            identifier = "delay",
+            label = "Delay between moves?",
+            variable_name = "do_delay"
+        ))
 
         for index, item in enumerate(self.settings_list):
             item.build(config_frame, index + 1)
@@ -1252,16 +1144,66 @@ class ChessApp(parent_class):
         for index, item in enumerate(self.settings_list):
             item.run_build_command()
 
-        config_frame.pack(expand=tk.YES, fill=tk.Y)
+        config_frame.grid(row=1, column=0, sticky="ns")
+        
+        #########
+        
+        if use_bootstrap:
+            self.bot_log = ttk.ScrolledText(
+                master = self.contents,
+                wrap = "word",
+                state = "disabled"
+            )
+        else:
+            self.bot_log = tk.Text(
+                master = self.contents,
+                wrap = "word",
+                state = "disabled"
+            )
+            
+        self.bot_log.grid(
+            row = 0,
+            column = 1,
+            rowspan = 2,
+            pady = 5,
+            padx = 5,
+            sticky = "nesw"
+        )
+        monospaced_font_tuple = ("Consolas", 10)
+        self.bot_log.config(font=monospaced_font_tuple)
 
 def main():
-    kwargs = {}
-    
-    if use_bootstrap:
-        kwargs["themename"] = THEME
+    database = PuzzleDatabase()
+    try:
+        # global puzzle_data
         
-    chess_app = ChessApp(**kwargs)
-    chess_app.mainloop()
+        kwargs = {}
+        
+        if use_bootstrap:
+            kwargs["themename"] = THEME
+            
+        # database_loader = DatabaseLoader(**kwargs)
+        # database_loader.mainloop()
+        
+        chess_app = ChessApp(database, **kwargs)
+    
+        global print
+        
+        def custom_print(*args, **kwargs):
+            chess_app.add_log(" ".join(map(str, args)))
+            builtins.print(*args, **kwargs)
+            
+        print = custom_print
+        base.print = custom_print
+        for module in base.bot_modules.values():
+            module.print = custom_print
+        
+        chess_app.mainloop()
+        
+        # Attempt to free up the memory.
+        # del puzzle_data
+    finally:
+        database.teardown()
 
 if __name__ == "__main__":
     main()
