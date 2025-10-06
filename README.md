@@ -14,6 +14,8 @@ Python and library version information:
 - [`bot_testing.pyw`](https://github.com/MrSquirrelDeDuck/chess-bots/blob/main/bot_testing.pyw): Same as `bot_testing_console.py`, but double clicking to run it will not open up a terminal window.
 - [`play_against_console.py`](https://github.com/MrSquirrelDeDuck/chess-bots/blob/main/play_against_console.py): Program for playing against a bot. This also has the ability to put two bots against each other in a single game, similar to `bot_testing_console.py`, but this one has a visual board so you can watch the game as it is going.
 - [`play_against.pyw`](https://github.com/MrSquirrelDeDuck/chess-bots/blob/main/play_against.pyw): Same as `play_against_console.py`, but double clicking to run it will not open up a terminal window.
+- [`puzzles_console.py`](https://github.com/MrSquirrelDeDuck/chess-bots/blob/main/puzzles_console.py): Program for having the bots complete puzzles from [Lichess](https://lichess.org)'s [puzzle database](https://database.lichess.org/#puzzles). Note that running this does require downloading the database, as it does not request puzzles via the Lichess API.
+- [`puzzles.pyw`](https://github.com/MrSquirrelDeDuck/chess-bots/blob/main/puzzles.pyw): Same as `puzzles_console.py`, but double clicking to run it will not open up a terminal window.
 
 ## Directory information:
 - [`images`](https://github.com/MrSquirrelDeDuck/chess-bots/tree/main/images): Folder containing the images used by both programs.
