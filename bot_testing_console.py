@@ -7,6 +7,7 @@ import typing
 import threading
 import traceback
 import builtins
+import time
 
 import base
 
@@ -357,6 +358,7 @@ class ChessApp(parent_class):
         # Before starting the game, make sure the given start SAN is valid.
         # Only do this, however, if the random start tickbox is enabled.
         custom_start = None
+        start_time = time.time()
         
         if self.random_start:
             board = chess.Board()
@@ -390,7 +392,9 @@ class ChessApp(parent_class):
             custom_start_san = custom_start
         )
         
+        end_time = time.time()
         print(result)
+        print(f"Elapsed time: {round(end_time-start_time, 2)}")
         
         result_fen = "FEN: " + result["fen"]
         
